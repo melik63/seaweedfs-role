@@ -20,16 +20,23 @@ seaweedfs_values:
     replicas: 1
   filer:
     replicas: 1
-    storage: 10Gi
   s3:
     enabled: true
-
-# External IP for service patch
-seaweedfs_external_ip: "192.168.1.23"
-# Название сервиса, который патчим (например, seaweedfs-master)
-seaweedfs_service_name: "seaweedfs-s3"
-
-AdminAccessKey: 'immich'
-AdminSecretKey: 'immich_pass'
-ReadOnlyAccessKey: 'immich_read'
-ReadOnlySecretKey: 'immich_read'
+    serviceType: LoadBalancer
+      serviceAnnotations:
+        metallb.universe.tf/address-pool: default
+    config: |
+      {
+        "identities": [
+          {
+            "name": "anvAdmin",
+            "credentials": [{"accessKey":"test1","secretKey":"test1"}],
+            "actions": ["Admin","Read","Write"]
+          },
+          {
+            "name": "anvReadOnly",
+            "credentials": [{"accessKey":"test","secretKey":"test"}],
+            "actions": ["Read"]
+          }
+        ]
+      }
