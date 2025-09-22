@@ -1,82 +1,55 @@
-- name: Проверить доступность kubectl
-  command: kubectl api-resources
-  register: kubectl_check
-  ignore_errors: yes
-  changed_when: false
+---
+- name: Ensure seaweedfs namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k3s_kubeconfig_path }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ seaweedfs_namespace }}"
+    state: present
 
-- name: Вывести ошибку, если kubectl недоступен
-  fail:
-    msg: "kubectl не установлен или не работает. Убедитесь, что k3s установлен корректно."
-  when: kubectl_check is failed
+- name: Add seaweedfs Helm repository
+  kubernetes.core.helm_repository:
+    name: seaweedfs
+    url: "{{ seaweedfs_chart_repo }}"
+  register: repo_added
 
-- name: Создать namespace seaweed (если не существует)
-  command: sh -c "kubectl get namespace {{ seaweed_namespace }} || kubectl create namespace {{ seaweed_namespace }}"
-  register: create_namespace
-  changed_when: "'already exists' not in create_namespace.stderr"
+- name: Update Helm repositories (if repo was added or changed)
+  ansible.builtin.command: "{{ helm_binary }} repo update"
+  when: repo_added.changed
 
-- name: Сгенерировать содержимое манифеста из шаблона в памяти
-  set_fact:
-    manifest_content: |
-      {{ lookup('template', 'templates/seaweedfs-s3.yaml.j2') }}
+- name: Install/Upgrade SeaweedFS Helm chart
+  kubernetes.core.helm:
+    kubeconfig: "{{ k3s_kubeconfig_path }}"
+    name: "{{ seaweedfs_release_name }}"
+    chart_ref: "seaweedfs/{{ seaweedfs_chart_name }}"
+    chart_version: "{{ seaweedfs_chart_version | default(omit) }}"
+    release_namespace: "{{ seaweedfs_namespace }}"
+    values: "{{ seaweedfs_values }}"
+    state: present
+  register: helm_result
 
-- name: Применить манифест через stdin, чтобы не использовать файл
-  shell: |
-    echo '{{ manifest_content }}' | kubectl apply -f -
-  args:
-    executable: /bin/bash
-  register: apply_result
-  changed_when: "'created' in apply_result.stdout or 'configured' in apply_result.stdout"
-  environment:
-    KUBECONFIG: "{{ kubeconfig_path }}"
+- name: Patch SeaweedFS service with external IP
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k3s_kubeconfig_path }}"
+    api_version: v1
+    kind: Service
+    namespace: "{{ seaweedfs_namespace }}"
+    name: "{{ seaweedfs_service_name }}"
+    merge_type: strategic-merge
+    definition:
+      spec:
+        externalIPs:
+          - "{{ seaweedfs_external_ip }}"
+  when: seaweedfs_external_ip | length > 0
 
-- name: Отладка — показать результат применения манифеста
-  debug:
-    msg: "{{ apply_result.stdout }}"
+- name: Wait for service to be available
+  ansible.builtin.wait_for:
+    host: "{{ seaweedfs_external_ip }}"
+    port: 8333
+    timeout: 120
+  when: seaweedfs_external_ip | length > 0
 
-- name: Подождать, пока под seaweedfs-master станет Ready
-  command: kubectl wait --for=condition=Ready pod -l app=seaweedfs-master -n {{ seaweed_namespace }} --timeout=120s
-  ignore_errors: yes
-  register: master_ready
-  retries: 6
-  delay: 10
-  until: master_ready is succeeded
-
-- name: Подождать, пока под seaweedfs-volume станет Ready
-  command: kubectl wait --for=condition=Ready pod -l app=seaweedfs-volume -n {{ seaweed_namespace }} --timeout=120s
-  ignore_errors: yes
-  register: volume_ready
-  retries: 6
-  delay: 10
-  until: volume_ready is succeeded
-
-- name: Подождать, пока под seaweedfs-filer станет Ready
-  command: kubectl wait --for=condition=Ready pod -l app=seaweedfs-filer -n {{ seaweed_namespace }} --timeout=120s
-  ignore_errors: yes
-  register: filer_ready
-  retries: 6
-  delay: 10
-  until: filer_ready is succeeded
-
-- name: Вывести статус подов
-  command: kubectl get pods -n {{ seaweed_namespace }}
-  register: pod_status
-  changed_when: false
-
-- name: Отладка. Вывести статус подов
-  debug:
-    msg: "{{ pod_status.stdout }}"
-
-- name: Вывести информацию о сервисах
-  command: kubectl get svc -n {{ seaweed_namespace }}
-  register: svc_status
-  changed_when: false
-
-- name: Отладка. Вывести сервисы
-  debug:
-    msg: "{{ svc_status.stdout }}"
-
-- name: Вывести команду для входа в weed shell
-  debug:
-    msg: |
-      Чтобы войти в weed shell:
-      kubectl -n seaweed exec -it deploy/seaweedfs-master -- weed shell -master=seaweedfs-master:9333
+- name: Display Helm release status
+  ansible.builtin.debug:
+    msg: "SeaweedFS Helm release '{{ seaweedfs_release_name }}' deployed successfully in namespace '{{ seaweedfs_namespace }}'"
+  when: helm_result.changed
