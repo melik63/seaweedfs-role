@@ -28,18 +28,21 @@
     state: present
   register: helm_result
 
-- name: Patch SeaweedFS service with external IP
+- name: Update SeaweedFS service — set type=LoadBalancer and add shared IP annotation
   kubernetes.core.k8s:
     kubeconfig: "{{ k3s_kubeconfig_path }}"
     api_version: v1
     kind: Service
     namespace: "{{ seaweedfs_namespace }}"
     name: "{{ seaweedfs_service_name }}"
+    state: present
     merge_type: strategic-merge
     definition:
+      metadata:
+        annotations:
+          metallb.universe.tf/allow-shared-ip: "immich-shared"
       spec:
-        externalIPs:
-          - "{{ seaweedfs_external_ip }}"
+        type: LoadBalancer
   when: seaweedfs_external_ip | length > 0
 
 - name: Wait for service to be available
